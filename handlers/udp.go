@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"faasnat/context"
+
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
 	"github.com/howeyc/crc16"
@@ -141,6 +143,7 @@ var lIp *net.IP
 var lIpInt32 uint32
 var lIpStr string
 var isInSameSubnet func(*net.IP) bool
+var ctx *context.Context
 
 func init() {
 	lIp, err := getLocalIpAddr()
@@ -153,6 +156,10 @@ func init() {
 	lIpStr = lIp.String()
 	netmask := net.IPv4(255, 255, 255, 0)
 	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
+	ctx, err = context.New("localhost", 6379)
+	if err != nil {
+		log.Fatalf("Error obtaining Context: %s\n", err)
+	}
 
 	log.Printf("Local IP address resolved to: %s\n", lIpStr)
 	log.Printf("Netmask resolved to: %s\n", netmask)
