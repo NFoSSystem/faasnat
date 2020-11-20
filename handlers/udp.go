@@ -14,8 +14,8 @@ import (
 
 	"faasnat/context"
 
-	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
+
 	"github.com/howeyc/crc16"
 	"github.com/willf/bitset"
 )
@@ -38,13 +38,29 @@ type tupleCouple struct {
 	out *tuple
 }
 
-type packet []byte
+type packet struct {
+	pktBuff []byte
+	srcAddr net.IP
+	srcPort uint16
+	trgAddr net.IP
+	trgPort uint16
+}
 
 type mappingVal struct {
 	port        uint16
 	flow        chan packet
 	stop        chan struct{}
 	lastUseTime *time.Time
+}
+
+type chanMapVal struct {
+	lastUse *time.Time
+	conn    *net.IPConn
+}
+
+type chanMap struct {
+	im map[uint16]*chanMapVal
+	mu sync.Mutex
 }
 
 func getCrc16FromIPAndPort(addr *net.IP, port uint16) uint16 {
@@ -117,26 +133,19 @@ func getSameSubnetFunction(lIpAddr, netmaskAddr *net.IP) func(addr *net.IP) bool
 	}
 }
 
-func private2PublicChangeFields(ipv4 *header.IPv4, udp *header.UDP, port uint16) *header.IPv4 {
-	ipv4.SetSourceAddress(tcpip.Address(lIpStr))
-	partialCksm := ipv4.CalculateChecksum()
-	udp.SetSourcePort(port)
-	cksm := udp.CalculateChecksum(partialCksm)
-	udp.SetChecksum(cksm)
-	payload := ipv4.Payload()
-	copy(payload, []byte(*udp))
-	return ipv4
-}
+func changeFieldsInPacket(pkt packet) []byte {
+	ipv4 := header.IPv4(pkt.pktBuff)
+	udp := header.UDP(ipv4.Payload())
 
-func public2PrivateChangeFields(ipv4 *header.IPv4, udp *header.UDP, dstAddr *net.IP, port uint16) *header.IPv4 {
-	ipv4.SetDestinationAddress(tcpip.Address(dstAddr.String()))
-	partialCksm := ipv4.CalculateChecksum()
-	udp.SetDestinationPort(port)
-	cksm := udp.CalculateChecksum(partialCksm)
-	udp.SetChecksum(cksm)
-	payload := ipv4.Payload()
-	copy(payload, []byte(*udp))
-	return ipv4
+	udp.SetDestinationPort(pkt.trgPort)
+	udp.SetSourcePort(pkt.srcPort)
+
+	xsum := header.PseudoHeaderChecksum(header.UDPProtocolNumber, ipv4.SourceAddress(), ipv4.DestinationAddress(),
+		uint16(len(udp)))
+	xsum = header.Checksum(udp.Payload(), xsum)
+	udp.SetChecksum(^udp.CalculateChecksum(xsum))
+
+	return []byte(udp)
 }
 
 var lIp *net.IP
@@ -144,167 +153,149 @@ var lIpInt32 uint32
 var lIpStr string
 var isInSameSubnet func(*net.IP) bool
 var ctx *context.Context
+var outCtx *context.Context
+var inCtx *context.Context
+var pktChan chan packet
+var cMap *chanMap
 
-func init() {
-	lIp, err := getLocalIpAddr()
-	if err != nil {
-		log.Printf("Error obtaining local IP address: %s\n", err)
-		return
-	}
-
-	lIpInt32 = ipv4ToInt32(lIp)
-	lIpStr = lIp.String()
-	netmask := net.IPv4(255, 255, 255, 0)
-	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
-	ctx, err = context.New("localhost", 6379)
-	if err != nil {
-		log.Fatalf("Error obtaining Context: %s\n", err)
-	}
-
-	log.Printf("Local IP address resolved to: %s\n", lIpStr)
-	log.Printf("Netmask resolved to: %s\n", netmask)
-}
-
-func StartUDPNat() {
-	um := new(udpMapping)
-	um.i2oMap = make(map[uint16]mappingVal)
-	um.o2iMap = make(map[uint16]mappingVal)
-	um.mv2tc = make(map[*mappingVal]*tupleCouple)
-	um.bSet = bitset.New(65535)
-
-	//conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(0, 0, 0, 0), ""})
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(127, 0, 0, 1), 5000, ""})
-	if err != nil {
-		log.Printf("Error instantiating UDP NAT: %s\n", err)
-		return
-	}
-
-	for {
-		buff := make([]byte, 65535)
-		size, err := conn.Read(buff)
+func (cm *chanMap) GetConn(addr *net.IP) (*net.IPConn, error) {
+	cm.mu.Lock()
+	crc := crc16.ChecksumIBM([]byte(*addr))
+	if val, ok := cm.im[crc]; ok {
+		t := time.Now()
+		val.lastUse = &t
+		cm.mu.Unlock()
+		return val.conn, nil
+	} else {
+		conn, err := net.DialIP("ip4:udp", &net.IPAddr{*lIp, ""}, &net.IPAddr{*addr, ""})
 		if err != nil {
-			log.Printf("Error reading from UDP socket: %s\n", err)
-			continue
+			cm.mu.Unlock()
+			return nil, err
 		}
-
-		ipv4 := header.IPv4(buff[:size])
-		log.Printf("Packet received from %s headed to %s\n", ipv4.SourceAddress(), ipv4.DestinationAddress())
-
-		go um.handlePacket(buff[:size])
+		val := new(chanMapVal)
+		val.conn = conn
+		timer := time.NewTimer(UDP_CONNECTION_TIMEOUT_IN_SECONDS * time.Second)
+		tmpUse := time.Now()
+		val.lastUse = &tmpUse
+		go func() {
+			for {
+				select {
+				case <-timer.C:
+					if time.Since(*val.lastUse) > (UDP_CONNECTION_TIMEOUT_IN_SECONDS * time.Second) {
+						cm.mu.Lock()
+						delete(cm.im, crc)
+						conn.Close()
+						cm.mu.Unlock()
+						return
+					}
+				}
+			}
+		}()
+		cm.mu.Unlock()
+		return val.conn, nil
 	}
-
 }
 
-func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
-	log.Printf("Opening socket for %s:%d\n", dstAddr.String(), dstPort)
-	conn, err := net.Dial("ip4:udp", dstAddr.String())
-	if err != nil {
-		log.Printf("Error opening UDP connection to host %s: %s\n", dstAddr, err)
-		return
-	}
-	defer conn.Close()
-
-	timer := time.NewTimer(UDP_CONNECTION_TIMEOUT_IN_SECONDS * time.Second)
-
+func (cm *chanMap) sendPkt(pktChan chan packet) {
 	for {
 		select {
-		case pkt := <-mv.flow:
-			log.Printf("---------------> Packet sent to %s:%d\n", dstAddr.String(), dstPort)
-			conn.Write(pkt)
-			tmp := time.Now()
-			mv.lastUseTime = &tmp
-			continue
-		case <-mv.stop:
-			return
-		case <-timer.C:
-			if deltaTime := time.Since(*mv.lastUseTime) * time.Second; deltaTime <= UDP_CONNECTION_TIMEOUT_IN_SECONDS {
-				timer = time.NewTimer((UDP_CONNECTION_TIMEOUT_IN_SECONDS - deltaTime) * time.Second)
+		case pkt := <-pktChan:
+			conn, err := cm.GetConn(&pkt.trgAddr)
+			if err != nil {
+				log.Println(err)
 				continue
-			} else {
-				return
 			}
+
+			buff := changeFieldsInPacket(pkt)
+			conn.Write(buff)
+			log.Printf("DEBUG Sent packet %s:%d to %s:%d\n", pkt.srcAddr, pkt.srcPort, pkt.trgAddr, pkt.trgPort)
+			continue
 		}
 	}
 }
 
-func (um *udpMapping) getOuterFlowChan(it, ot tuple) chan packet {
-	um.mu.Lock()
+func getOuterFlowChan(ctx, outCtx, inCtx *context.Context, it, ot tuple) (uint16, error) {
+	inCrc := getCrc16FromIPAndPort(&it.addr, it.port)
+	if err := outCtx.OutFlowLock(fmt.Sprintf("%s:%d 1", it.addr, it.port)); err != nil {
+		return 0, fmt.Errorf("Error obtaining OutFlowLock: %s\n", err)
+	}
 
-	if val, ok := um.i2oMap[getCrc16FromIPAndPort(&it.addr, it.port)]; !ok {
-		mv := mappingVal{}
-		mv.flow = make(chan packet)
-		mv.stop = make(chan struct{})
-		tc := new(tupleCouple)
-		tc.in = &it
-		tc.out = &ot
-		tmp, err := um.getFirstAvailablePort(&it)
+	ip, port, err := outCtx.GetOutAddrPortCouple(it.port)
+	if err != nil {
+		return 0, fmt.Errorf("Error searching data from Redis Set: %s\n", err)
+	}
+
+	if err := outCtx.OutFlowUnLock(fmt.Sprintf("%s:%d 1", it.addr, it.port)); err != nil {
+		return 0, err
+	}
+
+	if ip == nil {
+		outPort, err := ctx.GetFirstAvailablePort(it.port)
 		if err != nil {
-			log.Println("ERROR all available UDP ports are used!")
-			return nil
+			return 0, err
 		}
-		mv.port = tmp
-		um.i2oMap[getCrc16FromIPAndPort(&it.addr, it.port)] = mv
 
-		addrSlice := make([]byte, len([]byte(it.addr))+len([]byte(ot.addr)))
-		addrSlice = append(addrSlice, []byte(it.addr)...)
-		addrSlice = append(addrSlice, []byte(ot.addr)...)
-		cks := crc16.ChecksumIBM(addrSlice)
-		um.o2iMap[cks] = mv
-		um.mv2tc[&mv] = tc
-		um.mu.Unlock()
-		go mv.sendPkt(&it.addr, it.port)
-		return mv.flow
+		if err := outCtx.OutFlowLock(fmt.Sprintf("%s:%d 2", it.addr, it.port)); err != nil {
+			return 0, fmt.Errorf("Error obtaining OutFlowLock: %s\n", err)
+		}
+
+		if err := outCtx.SetOutAddrPortCouple(inCrc, lIp, outPort); err != nil {
+			return 0, err
+		}
+
+		if err := outCtx.OutFlowUnLock(fmt.Sprintf("%s:%d 2", it.addr, it.port)); err != nil {
+			return 0, err
+		}
+
+		go func() {
+			addrSlice := make([]byte, len([]byte(*lIp))+len([]byte(ot.addr)))
+			addrSlice = append(addrSlice, []byte(*lIp)...)
+			addrSlice = append(addrSlice, []byte(ot.addr)...)
+			outCrc := crc16.ChecksumIBM(addrSlice)
+
+			inCtx.InFlowLock("getOuterFlowChan")
+			inCtx.SetInAddrPortCouple(outCrc, lIp, outPort)
+			inCtx.InFlowUnLock()
+		}()
+
+		return outPort, nil
 	} else {
-		tmp := time.Now()
-		val.lastUseTime = &tmp
-		um.mu.Unlock()
-		return val.flow
+		return port, nil
 	}
 }
 
-func (um *udpMapping) getInnerFlowChan(ot, it tuple) chan packet {
-	um.mu.Lock()
-
+func getInnerFlowChan(ctx, outCtx, inCtx *context.Context, ot, it tuple) (*net.IP, uint16, error) {
 	addrSlice := make([]byte, len([]byte(it.addr))+len([]byte(ot.addr)))
 	addrSlice = append(addrSlice, []byte(it.addr)...)
 	addrSlice = append(addrSlice, []byte(ot.addr)...)
 	cks := crc16.ChecksumIBM(addrSlice)
 
-	if val, ok := um.o2iMap[cks]; !ok {
-		// no flow has been opened, the external network incoming packet is filtered
-		um.mu.Unlock()
-		return nil
+	if err := inCtx.InFlowLock("getInnerFlowChan"); err != nil {
+		return nil, 0, fmt.Errorf("Error obtaining InFlowLock: %s\n", err)
+	}
+
+	ip, port, err := inCtx.GetInAddrPortCouple(cks)
+	if err != nil {
+		if err = inCtx.InFlowUnLock(); err != nil {
+			log.Println("Error releasing InFlow lock: %s\n", err)
+		}
+		return nil, 0, fmt.Errorf("Error searching data from Redis Set: %s\n", err)
+	}
+
+	if err = inCtx.InFlowUnLock(); err != nil {
+		log.Println("Error releasing InFlow lock: %s\n", err)
+	}
+
+	if ip == nil {
+		// filter out incoming packet
+		return nil, 0, nil
 	} else {
-		// a flow is open, the lastUseTime attribute is updated and the flow is returned
-		um.mu.Lock()
-		tmp := time.Now()
-		val.lastUseTime = &tmp
-		um.mu.Unlock()
-		return val.flow
+		return ip, port, nil
 	}
 }
 
 func isEven(num uint16) bool {
 	return num%2 == 0
-}
-
-func (um *udpMapping) getFirstAvailablePort(t *tuple) (uint16, error) {
-	var lower, upper uint16
-	if t.port < 1024 {
-		lower, upper = 0, 1024
-	} else {
-		lower, upper = 1024, 65535
-	}
-
-	var even bool = t.port%2 == 0
-
-	for i := uint16(lower); i < upper; i++ {
-		if (!even || isEven(i)) && !um.bSet.Test(uint(i)) {
-			return i, nil
-		}
-	}
-
-	return 0, nil
 }
 
 func getTupleFromUDPPacket(ipv4 header.IPv4, udp header.UDP) (*tupleCouple, error) {
@@ -327,7 +318,14 @@ func getTupleFromUDPPacket(ipv4 header.IPv4, udp header.UDP) (*tupleCouple, erro
 	return tc, nil
 }
 
-func (um *udpMapping) handlePacket(ipPkt packet) error {
+func (cm *chanMap) InitSenders(num uint8, pktChan chan packet) {
+	for i := uint8(0); i < num; i++ {
+		go cm.sendPkt(pktChan)
+		log.Printf("Sender %d instantiated\n", i)
+	}
+}
+
+func handlePacket(ctx, outCtx, inCtx *context.Context, ipPkt []byte, pktChan chan packet) error {
 	pkt := header.IPv4(ipPkt)
 	if pkt == nil || len(pkt) == 0 || pkt.Payload() == nil || len(pkt.Payload()) == 0 {
 		return fmt.Errorf("Error packet provided in input is null or empty!")
@@ -346,24 +344,97 @@ func (um *udpMapping) handlePacket(ipPkt packet) error {
 
 	log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
 
-	var pktChan chan packet
-
 	if isInSameSubnet(&ipAddr) {
-		pktChan = um.getOuterFlowChan(*tc.in, *tc.out)
-		if pktChan == nil {
+		port, err := getOuterFlowChan(ctx, outCtx, inCtx, *tc.in, *tc.out)
+		if err != nil {
+			log.Println(err)
 			return nil
 		}
-		//log.Println("------------> Packet sent to outer flow")
-		pktChan <- packet(pkt)
+
+		pktChan <- packet{pktBuff: pkt, srcAddr: *lIp, srcPort: port, trgAddr: tc.out.addr, trgPort: tc.out.port}
+		log.Println("------------> Packet sent to outer flow")
 	} else {
 		//log.Printf("Address %s and %s don't belong to the same subnet!\n", lIpStr, tc.in.addr)
-		pktChan = um.getInnerFlowChan(*tc.out, *tc.in)
-		if pktChan == nil {
+		ip, port, err := getInnerFlowChan(ctx, outCtx, inCtx, *tc.out, *tc.in)
+		if err != nil {
+			log.Println(err)
 			return nil
 		}
-		//log.Println("------------> Packet sent to inner flow")
-		pktChan <- packet(pkt)
+
+		pktChan <- packet{pktBuff: pkt, srcAddr: *lIp, srcPort: tc.in.port, trgAddr: *ip, trgPort: port}
+		log.Println("------------> Packet sent to inner flow")
 	}
 
 	return nil
+}
+
+func init() {
+	tmpIp, err := getLocalIpAddr()
+	if err != nil {
+		log.Printf("Error obtaining local IP address: %s\n", err)
+		return
+	}
+	lIp = tmpIp
+
+	lIpInt32 = ipv4ToInt32(lIp)
+	lIpStr = lIp.String()
+	netmask := net.IPv4(255, 255, 255, 0)
+	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
+	ctx, err = context.New("localhost", 6379)
+	if err != nil {
+		log.Fatalf("Error obtaining Context: %s\n", err)
+	}
+
+	outCtx, err = context.New("localhost", 6379)
+	if err != nil {
+		log.Fatalf("Error obtaining Context: %s\n", err)
+	}
+
+	inCtx, err = context.New("localhost", 6379)
+	if err != nil {
+		log.Fatalf("Error obtaining Context: %s\n", err)
+	}
+
+	log.Printf("Local IP address resolved to: %s\n", lIpStr)
+	log.Printf("Netmask resolved to: %s\n", netmask)
+
+	pktChan = make(chan packet, 100)
+	cMap = new(chanMap)
+	cMap.InitSenders(10, pktChan)
+	ctx.CleanUpSets()
+	ctx.InitPortsBitSet()
+	outCtx.CleanUpSets()
+	outCtx.InitPortsBitSet()
+	inCtx.CleanUpSets()
+	inCtx.InitPortsBitSet()
+
+	log.Printf("DEBUG lIp: %s\n", *lIp)
+}
+
+func StartUDPNat() {
+	//conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(0, 0, 0, 0), ""})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(127, 0, 0, 1), 5000, ""})
+	if err != nil {
+		log.Printf("Error instantiating UDP NAT: %s\n", err)
+		return
+	}
+	defer conn.Close()
+	defer ctx.Close()
+
+	for {
+		buff := make([]byte, 65535)
+		size, err := conn.Read(buff)
+		if err != nil {
+			log.Printf("Error reading from UDP socket: %s\n", err)
+			continue
+		}
+
+		ipv4 := header.IPv4(buff[:size])
+		log.Printf("Packet received from %s headed to %s\n", ipv4.SourceAddress(), ipv4.DestinationAddress())
+
+		log.Printf("DEBUG lIp: %s\n", *lIp)
+
+		go handlePacket(ctx, inCtx, outCtx, buff[:size], pktChan)
+	}
+
 }

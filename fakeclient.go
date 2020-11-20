@@ -3,76 +3,106 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
+	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
 )
 
+var msgPayload []byte = []byte{0x45, 0x0, 0x0, 0x21, 0xc2, 0xf8, 0x40, 0x0, 0x40, 0x11, 0x79,
+	0xd1, 0x7f, 0x0, 0x0, 0x1, 0x7f, 0x0, 0x0, 0x1, 0x94, 0xd9, 0x0, 0x35, 0x0, 0xd,
+	0xfe, 0x20, 0x74, 0x65, 0x73, 0x74, 0xa}
+
 //func main() {
-func Main() {
-	/*payload := []byte("example payload")
-	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{net.IPv4(127, 0, 0, 1), 53, ""})
-	if err != nil {
-		log.Fatalf("Error opening UDP connection: %s\n", err)
+func main() {
+	rand.Seed(time.Now().UnixNano())
+
+	for i := 0; i < 50; i++ {
+		lastIpByte := byte(rand.Intn(253-101) + 101)
+		srcPort := uint16(rand.Intn(65535-1023) + 1023)
+		dstPort := uint16(rand.Intn(65535-1023) + 1023)
+		client(tcpip.Address([]byte{192, 168, 1, lastIpByte}), tcpip.Address([]byte{8, 8, 8, 8}), srcPort, dstPort)
 	}
-	defer conn.Close()
+}
 
-	size, err := conn.Write(payload)
-	if err != nil {
-		log.Fatalf("Error sending byte buffer %v via UDP: %s\n", payload, err)
-	}
+func client(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16) {
+	ipPkt := header.IPv4(msgPayload)
+	ipPkt.SetSourceAddress(srcAddr)
+	ipPkt.SetDestinationAddress(dstAddr)
+	udpPkt := header.UDP(ipPkt.Payload())
+	udpPkt.SetSourcePort(srcPort)
+	udpPkt.SetDestinationPort(dstPort)
 
-	log.Printf("Content of payload written to socket: %v\n", payload[:size])
+	// Calculate UDP Packet checksum
+	xsum := header.PseudoHeaderChecksum(header.UDPProtocolNumber, ipPkt.SourceAddress(), ipPkt.DestinationAddress(),
+		uint16(len(udpPkt)))
+	xsum = header.Checksum(udpPkt.Payload(), xsum)
+	udpPkt.SetChecksum(^udpPkt.CalculateChecksum(xsum))
 
-	buff := make([]byte, 65535)
-	size, err = conn.Read(buff)
-	if err != nil {
-		log.Fatalf("Error reading from UDP socket after write: %s\n", err)
-	}
-
-	log.Printf("Content of buffer after read: %v\n", buff[:size])*/
-
-	// conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(127, 0, 0, 1), ""})
-	// if err != nil {
-	// 	log.Fatalf("Error opening UDP socket on port 53: %s\n", err)
-	// }
-	// defer conn.Close()
-
-	// for {
-	// 	buff := make([]byte, 65535)
-	// 	size, err := conn.Read(buff)
-	// 	if err != nil {
-	// 		log.Fatalf("Error reading from UDP port 53: %s\n", err)
-	// 		continue
-	// 	}
-
-	// 	ipPkt := header.IPv4(buff[:size])
-	// 	//addr := ipPkt.SourceAddress()
-	// 	//log.Printf("SourceAddress of incoming packet: %s\n", addr.String())
-	// 	udpPkt := header.UDP(ipPkt.Payload())
-	// 	//log.Printf("DestinationPort of incoming UDP packet: %d\n", udpPkt.DestinationPort())
-	// 	if udpPkt.DestinationPort() != uint16(53) {
-	// 		continue
-	// 	}
-
-	// 	printIPDatagramContent(&ipPkt, uint16(size))
-	// 	printUDPPacketContent(&udpPkt, uint16(udpPkt.Length()))
-	// }
-
-	var pkt []byte = []byte{0x45, 0x0, 0x0, 0x21, 0xc2, 0xf8, 0x40, 0x0, 0x40, 0x11, 0x79,
-		0xd1, 0x7f, 0x0, 0x0, 0x1, 0x7f, 0x0, 0x0, 0x1, 0x94, 0xd9, 0x0, 0x35, 0x0, 0xd,
-		0xfe, 0x20, 0x74, 0x65, 0x73, 0x74, 0xa}
-
-	ipPkt := header.IPv4(pkt)
-	ipPkt.SetSourceAddress(tcpip.Address([]byte{192, 168, 1, 248}))
-	ipPkt.SetDestinationAddress(tcpip.Address([]byte{8, 8, 8, 8}))
+	// Calculate IP Datagram checksum
 	chksm := ipPkt.CalculateChecksum()
 	ipPkt.SetChecksum(chksm)
 
-	srcPort := header.UDP(ipPkt.Payload()).SourcePort()
+	payload := ipPkt.Payload()
+	copy(payload, []byte(udpPkt))
 
-	pkt = []byte(ipPkt)
+	tmpPayload := []byte(ipPkt)
+
+	cConn, err := net.DialUDP("udp", nil, &net.UDPAddr{net.IPv4(127, 0, 0, 1), 5000, ""})
+	if err != nil {
+		log.Fatalf("Error opening UDP socket on port 53: %s\n", err)
+	}
+	defer cConn.Close()
+
+	cConn.Write(tmpPayload)
+	log.Printf("Packet set from %s:%d to %s:%d\n", srcAddr, srcPort, dstAddr, dstPort)
+}
+
+func server(srcPort uint16) {
+	sConn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(127, 0, 0, 1), ""})
+	if err != nil {
+		log.Fatalf("Error opening UDP socket on port %d: %s\n", srcPort, err)
+	}
+	defer sConn.Close()
+
+	for {
+	inner:
+		buff := make([]byte, 65535)
+		sConn.Read(buff)
+		rIpPkt := header.IPv4(buff)
+		rUdpPkt := header.UDP(rIpPkt.Payload())
+		if rUdpPkt.DestinationPort() != srcPort {
+			goto inner
+		}
+		log.Printf("Payload of packet received from %s:%d -> %v\n", rIpPkt.SourceAddress(), rUdpPkt.SourcePort(),
+			rUdpPkt.Payload())
+	}
+}
+
+func clientServer(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16) {
+	ipPkt := header.IPv4(msgPayload)
+	ipPkt.SetSourceAddress(srcAddr)
+	ipPkt.SetDestinationAddress(dstAddr)
+	udpPkt := header.UDP(ipPkt.Payload())
+	udpPkt.SetSourcePort(srcPort)
+	udpPkt.SetDestinationPort(dstPort)
+
+	// Calculate UDP Packet checksum
+	xsum := header.PseudoHeaderChecksum(header.UDPProtocolNumber, ipPkt.SourceAddress(), ipPkt.DestinationAddress(),
+		uint16(len(udpPkt)))
+	xsum = header.Checksum(udpPkt.Payload(), xsum)
+	udpPkt.SetChecksum(^udpPkt.CalculateChecksum(xsum))
+
+	// Calculate IP Datagram checksum
+	chksm := ipPkt.CalculateChecksum()
+	ipPkt.SetChecksum(chksm)
+
+	payload := ipPkt.Payload()
+	copy(payload, []byte(udpPkt))
+
+	tmpPayload := []byte(ipPkt)
 
 	cConn, err := net.DialUDP("udp", nil, &net.UDPAddr{net.IPv4(127, 0, 0, 1), 5000, ""})
 	if err != nil {
@@ -87,8 +117,8 @@ func Main() {
 	defer sConn.Close()
 
 	for {
-		cConn.Write(pkt)
-		log.Printf("Packet sent to %s:53\n", ipPkt.DestinationAddress())
+		cConn.Write(tmpPayload)
+		log.Printf("Packet set from %s:%d to %s:%d\n", srcAddr, srcPort, dstAddr, dstPort)
 
 	inner:
 		buff := make([]byte, 65535)
