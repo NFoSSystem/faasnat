@@ -112,7 +112,7 @@ func (sc *SharedContext) SetInAddrPortCouple(crc16 uint16, addr *net.IP, port ui
 
 func (sc *SharedContext) GetInAddrPortCouple(crc16 uint16) (*net.IP, uint16, error) {
 	res, err := sc.redis.Get(sc.ctx, "in:"+strconv.Itoa(int(crc16))).Result()
-	if err != nil {
+	if err != nil && err != redis.Nil {
 		return nil, 0, err
 	}
 

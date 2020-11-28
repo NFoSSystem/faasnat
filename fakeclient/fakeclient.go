@@ -3,9 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
-	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
@@ -15,16 +13,17 @@ var msgPayload []byte = []byte{0x45, 0x0, 0x0, 0x21, 0xc2, 0xf8, 0x40, 0x0, 0x40
 	0xd1, 0x7f, 0x0, 0x0, 0x1, 0x7f, 0x0, 0x0, 0x1, 0x94, 0xd9, 0x0, 0x35, 0x0, 0xd,
 	0xfe, 0x20, 0x74, 0x65, 0x73, 0x74, 0xa}
 
-//func main() {
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	/*rand.Seed(time.Now().UnixNano())
 
 	for i := 0; i < 50; i++ {
 		lastIpByte := byte(rand.Intn(253-101) + 101)
 		srcPort := uint16(rand.Intn(65535-1023) + 1023)
 		dstPort := uint16(rand.Intn(65535-1023) + 1023)
 		client(tcpip.Address([]byte{192, 168, 1, lastIpByte}), tcpip.Address([]byte{8, 8, 8, 8}), srcPort, dstPort)
-	}
+	}*/
+
+	client(tcpip.Address([]byte{192, 168, 1, 239}), tcpip.Address([]byte{192, 168, 1, 102}), 2016, 8924)
 }
 
 func client(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16) {
@@ -81,7 +80,7 @@ func server(srcPort uint16) {
 	}
 }
 
-func clientServer(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16) {
+func ClientServer(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16) {
 	ipPkt := header.IPv4(msgPayload)
 	ipPkt.SetSourceAddress(srcAddr)
 	ipPkt.SetDestinationAddress(dstAddr)

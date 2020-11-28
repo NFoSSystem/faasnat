@@ -134,7 +134,7 @@ func getSameSubnetFunction(lIpAddr, netmaskAddr *net.IP) func(addr *net.IP) bool
 	}
 }
 
-func changeFieldsInPacket(pkt packet) []byte {
+func changeFieldsInPacket(pkt packet) packet {
 	ipv4 := header.IPv4(pkt.pktBuff)
 	udp := header.UDP(ipv4.Payload())
 
@@ -146,7 +146,8 @@ func changeFieldsInPacket(pkt packet) []byte {
 	xsum = header.Checksum(udp.Payload(), xsum)
 	udp.SetChecksum(^udp.CalculateChecksum(xsum))
 
-	return []byte(udp)
+	pkt.pktBuff = []byte(udp)
+	return pkt
 }
 
 var lIp *net.IP
@@ -157,20 +158,16 @@ var pktChan chan packet
 var cMap *chanMap
 var sc *natdb.SharedContext
 
-func (cm *chanMap) GetConn(addr *net.IP, srcPort, trgPort uint16) (*net.UDPConn, error) {
+func (cm *chanMap) GetConn(srcAddr, trgAddr *net.IP, srcPort, trgPort uint16) (*net.UDPConn, error) {
 	cm.mu.Lock()
-	crc := crc16.ChecksumIBM([]byte(*addr))
-	log.Printf("DEBUG Calculated crc: %d\n", crc)
+	crc := crc16.ChecksumIBM([]byte(*trgAddr))
 	if val, ok := cm.im[crc]; ok {
-		log.Println("DEBUG Entry found in map")
 		t := time.Now()
 		val.lastUse = &t
 		cm.mu.Unlock()
 		return val.conn, nil
 	} else {
-		log.Println("DEBUG Entry not found in map")
-		conn, err := net.DialUDP("udp", &net.UDPAddr{*lIp, int(srcPort), ""}, &net.UDPAddr{*addr, int(trgPort), ""})
-		//conn, err := net.DialIP("ip4:udp", &net.IPAddr{*lIp, ""}, &net.IPAddr{*addr, ""})
+		conn, err := net.DialUDP("udp", &net.UDPAddr{*lIp, int(srcPort), ""}, &net.UDPAddr{*trgAddr, int(trgPort), ""})
 		if err != nil {
 			cm.mu.Unlock()
 			return nil, err
@@ -192,6 +189,7 @@ func (cm *chanMap) GetConn(addr *net.IP, srcPort, trgPort uint16) (*net.UDPConn,
 						cm.mu.Unlock()
 						return
 					}
+					return
 				}
 			}
 		}()
@@ -204,14 +202,16 @@ func (cm *chanMap) sendPkt(pktChan chan packet) {
 	for {
 		select {
 		case pkt := <-pktChan:
-			conn, err := cm.GetConn(&pkt.trgAddr, pkt.srcPort, pkt.trgPort)
+			conn, err := cm.GetConn(&pkt.srcAddr, &pkt.trgAddr, pkt.srcPort, pkt.trgPort)
 			if err != nil {
 				log.Println(err)
 				continue
 			}
 
-			//buff := changeFieldsInPacket(pkt)
-			conn.Write(pkt.pktBuff)
+			_, err = conn.Write(pkt.pktBuff)
+			if err != nil {
+				log.Printf("Error writing to socket headed to %s:%d: %s\n", pkt.trgAddr, pkt.trgPort, err)
+			}
 			log.Printf("Sent packet %s:%d to %s:%d\n", pkt.srcAddr, pkt.srcPort, pkt.trgAddr, pkt.trgPort)
 			continue
 		}
@@ -225,12 +225,13 @@ func getOuterFlowChan(it, ot tuple) (uint16, error) {
 		return 0, fmt.Errorf("Error obtaining OutFlowLock: %s\n", err)
 	}
 
-	ip, port, err := sc.GetOutAddrPortCouple(it.port)
+	ip, port, err := sc.GetOutAddrPortCouple(inCrc)
 	if err != nil {
+		err = fmt.Errorf("Error searching data from Redis Set: %s\n", err)
 		if err := sc.OutFlowUnLock(lock); err != nil {
 			return 0, err
 		}
-		return 0, fmt.Errorf("Error searching data from Redis Set: %s\n", err)
+		return 0, err
 	}
 
 	if err := sc.OutFlowUnLock(lock); err != nil {
@@ -267,7 +268,7 @@ func getOuterFlowChan(it, ot tuple) (uint16, error) {
 				log.Println("Error acquiring InFlowLock: %s\n", err)
 				return
 			}
-			sc.SetInAddrPortCouple(outCrc, lIp, outPort)
+			sc.SetInAddrPortCouple(outCrc, &it.addr, it.port)
 			if err := sc.InFlowUnLock(lock); err != nil {
 				log.Println("Error releasing InFlowLock: %s\n", err)
 			}
@@ -280,9 +281,9 @@ func getOuterFlowChan(it, ot tuple) (uint16, error) {
 }
 
 func getInnerFlowChan(ot, it tuple) (*net.IP, uint16, error) {
-	addrSlice := make([]byte, len([]byte(it.addr))+len([]byte(ot.addr)))
+	addrSlice := make([]byte, len([]byte(*lIp))+len([]byte(it.addr)))
+	addrSlice = append(addrSlice, []byte(*lIp)...)
 	addrSlice = append(addrSlice, []byte(it.addr)...)
-	addrSlice = append(addrSlice, []byte(ot.addr)...)
 	cks := crc16.ChecksumIBM(addrSlice)
 
 	lock, err := sc.InFlowLock(ot.port)
@@ -355,13 +356,14 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 
 	ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
 
-	if !isInSameSubnet(&ipAddr) {
-		return nil
-	}
-
 	log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
 
-	if isInSameSubnet(&ipAddr) {
+	// TO BE REMOVED - START
+	ip := net.IPv4(192, 168, 1, 102)
+	destIp := ipv4ToInt32(&ip)
+	// TO BE REMOVED - END
+
+	if isInSameSubnet(&ipAddr) && destIp != ipv4ToInt32(&ipAddr) {
 		port, err := getOuterFlowChan(*tc.in, *tc.out)
 		if err != nil {
 			log.Println(err)
@@ -376,7 +378,14 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 			return nil
 		}
 
-		pktChan <- packet{pktBuff: pkt, srcAddr: *lIp, srcPort: tc.in.port, trgAddr: *ip, trgPort: port}
+		if ip == nil && port == 0 {
+			// filter incoming packet
+			return nil
+		}
+
+		optPkt := changeFieldsInPacket(packet{pktBuff: pkt, srcAddr: tc.in.addr, srcPort: tc.in.port, trgAddr: *ip, trgPort: port})
+
+		pktChan <- packet(optPkt)
 	}
 
 	return nil
@@ -411,7 +420,7 @@ func init() {
 
 func StartUDPNat() {
 	defer sc.Close()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(127, 0, 0, 1), 5000, ""})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(0, 0, 0, 0), 5000, ""})
 	if err != nil {
 		log.Printf("Error instantiating UDP NAT: %s\n", err)
 		return
@@ -463,8 +472,6 @@ func StartIPInterface() {
 		if res != destIp {
 			continue
 		}
-
-		log.Printf("Dump packet received from %s:%d\n", ip4Pkt.SourceAddress(), udpPkt.SourcePort)
 
 		go handlePacket(buff[:size], pktChan)
 	}
