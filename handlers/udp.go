@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"faasnat/natdb"
+	"bitbucket.org/Manaphy91/faasnat/natdb"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
