@@ -412,8 +412,15 @@ func init() {
 	cMap = new(chanMap)
 	cMap.im = make(map[uint16]*chanMapVal)
 	cMap.InitSenders(10, pktChan)
-	ctx.CleanUpSets()
-	ctx.InitBitSets()
+	if err := ctx.CleanUpSets(); err != nil {
+		log.Fatalln(err)
+	}
+	if err := ctx.CleanUpFlowSets(); err != nil {
+		log.Fatalln(err)
+	}
+	if err := ctx.InitBitSets(); err != nil {
+		log.Fatalln(err)
+	}
 	ctx.Close()
 	sc = natdb.New("localhost", 6379)
 }
