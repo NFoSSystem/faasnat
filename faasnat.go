@@ -1,8 +1,9 @@
 package main
 
 import (
-	"faasnat/handlers"
 	"log"
+
+	"bitbucket.org/Manaphy91/faasnat/handlers"
 )
 
 func main() {
