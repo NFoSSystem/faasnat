@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"bitbucket.org/Manaphy91/faasnat/natdb"
+	"bitbucket.org/Manaphy91/faasnat/utils"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
@@ -82,7 +82,7 @@ type udpMapping struct {
 func getGatewayIP() net.IP {
 	file, err := os.Open(ROUTE_FILENAME)
 	if err != nil {
-		log.Fatal(err)
+		utils.Log.Fatal(err)
 	}
 	defer file.Close()
 
@@ -106,7 +106,7 @@ func getLocalIpAddr() (*net.IP, error) {
 	addrs, err := net.InterfaceAddrs()
 
 	if err != nil {
-		fmt.Printf("Error obtaining the gateway address")
+		utils.Log.Printf("Error obtaining the gateway address\n")
 	}
 
 	for _, addr := range addrs {
@@ -204,15 +204,15 @@ func (cm *chanMap) sendPkt(pktChan chan packet) {
 		case pkt := <-pktChan:
 			conn, err := cm.GetConn(&pkt.srcAddr, &pkt.trgAddr, pkt.srcPort, pkt.trgPort)
 			if err != nil {
-				log.Println(err)
+				utils.Log.Println(err)
 				continue
 			}
 
 			_, err = conn.Write(pkt.pktBuff)
 			if err != nil {
-				log.Printf("Error writing to socket headed to %s:%d: %s\n", pkt.trgAddr, pkt.trgPort, err)
+				utils.Log.Printf("Error writing to socket headed to %s:%d: %s\n", pkt.trgAddr, pkt.trgPort, err)
 			}
-			log.Printf("Sent packet %s:%d to %s:%d\n", pkt.srcAddr, pkt.srcPort, pkt.trgAddr, pkt.trgPort)
+			utils.Log.Printf("Sent packet %s:%d to %s:%d\n", pkt.srcAddr, pkt.srcPort, pkt.trgAddr, pkt.trgPort)
 			continue
 		}
 	}
@@ -265,12 +265,12 @@ func getOuterFlowChan(it, ot tuple) (uint16, error) {
 
 			lock, err := sc.InFlowLock(ot.port)
 			if err != nil {
-				log.Println("Error acquiring InFlowLock: %s\n", err)
+				utils.Log.Println("Error acquiring InFlowLock: %s\n", err)
 				return
 			}
 			sc.SetInAddrPortCouple(outCrc, &it.addr, it.port)
 			if err := sc.InFlowUnLock(lock); err != nil {
-				log.Println("Error releasing InFlowLock: %s\n", err)
+				utils.Log.Println("Error releasing InFlowLock: %s\n", err)
 			}
 		}()
 
@@ -295,13 +295,13 @@ func getInnerFlowChan(ot, it tuple) (*net.IP, uint16, error) {
 	if err != nil {
 		err = sc.InFlowUnLock(lock)
 		if err != nil {
-			log.Println("Error releasing InFlow lock: %s\n", err)
+			utils.Log.Println("Error releasing InFlow lock: %s\n", err)
 		}
 		return nil, 0, fmt.Errorf("Error searching data from Redis Set: %s\n", err)
 	}
 
 	if err = sc.InFlowUnLock(lock); err != nil {
-		log.Println("Error releasing InFlow lock: %s\n", err)
+		utils.Log.Println("Error releasing InFlow lock: %s\n", err)
 	}
 
 	if ip == nil {
@@ -339,7 +339,7 @@ func getTupleFromUDPPacket(ipv4 header.IPv4, udp header.UDP) (*tupleCouple, erro
 func (cm *chanMap) InitSenders(num uint8, pktChan chan packet) {
 	for i := uint8(0); i < num; i++ {
 		go cm.sendPkt(pktChan)
-		log.Printf("Sender %d instantiated\n", i)
+		utils.Log.Printf("Sender %d instantiated\n", i)
 	}
 }
 
@@ -356,7 +356,7 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 
 	ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
 
-	log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
+	utils.Log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
 
 	// TO BE REMOVED - START
 	ip := net.IPv4(192, 168, 1, 102)
@@ -366,7 +366,7 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 	if isInSameSubnet(&ipAddr) && destIp != ipv4ToInt32(&ipAddr) {
 		port, err := getOuterFlowChan(*tc.in, *tc.out)
 		if err != nil {
-			log.Println(err)
+			utils.Log.Println(err)
 			return nil
 		}
 
@@ -374,7 +374,7 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 	} else {
 		ip, port, err := getInnerFlowChan(*tc.out, *tc.in)
 		if err != nil {
-			log.Println(err)
+			utils.Log.Println(err)
 			return nil
 		}
 
@@ -391,10 +391,10 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 	return nil
 }
 
-func init() {
+func InitNat() {
 	tmpIp, err := getLocalIpAddr()
 	if err != nil {
-		log.Printf("Error obtaining local IP address: %s\n", err)
+		utils.Log.Printf("Error obtaining local IP address: %s\n", err)
 		return
 	}
 	lIp = tmpIp
@@ -403,33 +403,23 @@ func init() {
 	lIpStr = lIp.String()
 	netmask := net.IPv4(255, 255, 255, 0)
 	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
-	ctx := natdb.New("localhost", 6379)
 
-	log.Printf("Local IP address resolved to: %s\n", lIpStr)
-	log.Printf("Netmask resolved to: %s\n", netmask)
+	utils.Log.Printf("Local IP address resolved to: %s\n", lIpStr)
+	utils.Log.Printf("Netmask resolved to: %s\n", netmask)
 
 	pktChan = make(chan packet, 100)
 	cMap = new(chanMap)
 	cMap.im = make(map[uint16]*chanMapVal)
 	cMap.InitSenders(10, pktChan)
-	if err := ctx.CleanUpSets(); err != nil {
-		log.Fatalln(err)
-	}
-	if err := ctx.CleanUpFlowSets(); err != nil {
-		log.Fatalln(err)
-	}
-	if err := ctx.InitBitSets(); err != nil {
-		log.Fatalln(err)
-	}
-	ctx.Close()
-	sc = natdb.New("localhost", 6379)
+	sc = natdb.New(getGatewayIP().String(), 6379)
 }
 
-func StartUDPNat() {
+func StartUDPNat(listenPort int) {
+	InitNat()
 	defer sc.Close()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(0, 0, 0, 0), 5000, ""})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(0, 0, 0, 0), listenPort, ""})
 	if err != nil {
-		log.Printf("Error instantiating UDP NAT: %s\n", err)
+		utils.Log.Printf("Error instantiating UDP NAT: %s\n", err)
 		return
 	}
 	defer conn.Close()
@@ -438,7 +428,7 @@ func StartUDPNat() {
 		buff := make([]byte, 65535)
 		size, err := conn.Read(buff)
 		if err != nil {
-			log.Printf("Error reading from UDP socket: %s\n", err)
+			utils.Log.Printf("Error reading from UDP socket: %s\n", err)
 			continue
 		}
 
@@ -448,10 +438,10 @@ func StartUDPNat() {
 	sc.CleanUpSets()
 }
 
-func StartIPInterface() {
+func StartIPInterface(listenPort uint16) {
 	conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(0, 0, 0, 0), ""})
 	if err != nil {
-		log.Printf("Error opening connection on IP interface: %s\n", err)
+		utils.Log.Printf("Error opening connection on IP interface: %s\n", err)
 		return
 	}
 
@@ -462,15 +452,15 @@ func StartIPInterface() {
 		buff := make([]byte, 65535)
 		size, err := conn.Read(buff)
 		if err != nil {
-			log.Printf("Error reading from UDP socket: %s\n", err)
+			utils.Log.Printf("Error reading from UDP socket: %s\n", err)
 			continue
 		}
 
 		ip4Pkt := header.IPv4(buff[:size])
 		udpPkt := header.UDP(ip4Pkt.Payload())
 
-		if udpPkt.DestinationPort() == 5000 {
-			log.Println("Skipping incoming packet on port 5000")
+		if udpPkt.DestinationPort() == listenPort {
+			utils.Log.Printf("Skipping incoming packet on port %d\n", listenPort)
 			continue
 		}
 

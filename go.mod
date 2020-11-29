@@ -3,6 +3,7 @@ module bitbucket.org/Manaphy91/faasnat
 go 1.15
 
 require (
+	bitbucket.org/Manaphy91/nflib v0.0.0-20201129173450-4d8ab6a116a6
 	github.com/bsm/redislock v0.7.0
 	github.com/go-redis/redis/v8 v8.4.0
 	github.com/google/btree v1.0.0 // indirect
