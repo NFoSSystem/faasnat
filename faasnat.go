@@ -4,20 +4,20 @@ import (
 	"fmt"
 	"log"
 
-	"bitbucket.org/Manaphy91/faasnat/handlers@4c99c06a53"
-	"bitbucket.org/Manaphy91/faasnat/utils@4c99c06a53"
-	"bitbucket.org/Manaphy91/nflib@4c99c06a53"
+	"handlers"
+	"nflib"
+	"utils"
 )
 
-func main() {
-	// utils.Log.Println("Starting UDP Nat")
-	// stopChan := make(chan struct{})
-	// go handlers.StartIPInterface(1)
-	// handlers.StartUDPNat(1)
-	// <-stopChan
-	var m map[string]interface{}
-	Main(m)
-}
+// func main() {
+// 	// utils.Log.Println("Starting UDP Nat")
+// 	// stopChan := make(chan struct{})
+// 	// go handlers.StartIPInterface(1)
+// 	// handlers.StartUDPNat(1)
+// 	// <-stopChan
+// 	var m map[string]interface{}
+// 	Main(m)
+// }
 
 func Main(obj map[string]interface{}) map[string]interface{} {
 	lIp, _ := nflib.GetLocalIpAddr()

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/Manaphy91/faasnat/natdb"
-	"bitbucket.org/Manaphy91/faasnat/utils"
+	"natdb"
+	"utils"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
