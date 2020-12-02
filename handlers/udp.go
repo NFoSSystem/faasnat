@@ -151,6 +151,7 @@ func changeFieldsInPacket(pkt packet) packet {
 }
 
 var lIp *net.IP
+var gIp *net.IP
 var lIpInt32 uint32
 var lIpStr string
 var isInSameSubnet func(*net.IP) bool
@@ -345,8 +346,10 @@ func (cm *chanMap) InitSenders(num uint8, pktChan chan packet) {
 
 func handlePacket(ipPkt []byte, pktChan chan packet) error {
 	pkt := header.IPv4(ipPkt)
+
 	if pkt == nil || len(pkt) == 0 || pkt.Payload() == nil || len(pkt.Payload()) == 0 {
-		return fmt.Errorf("Error packet provided in input is null or empty!")
+		utils.Log.Printf("Error packet provided in input is null or empty!")
+		return nil
 	}
 
 	tc, err := getTupleFromUDPPacket(pkt, header.UDP(pkt.Payload()))
@@ -370,7 +373,7 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 			return nil
 		}
 
-		pktChan <- packet{pktBuff: pkt, srcAddr: *lIp, srcPort: port, trgAddr: tc.out.addr, trgPort: tc.out.port}
+		pktChan <- packet{pktBuff: pkt, srcAddr: *gIp, srcPort: port, trgAddr: tc.out.addr, trgPort: tc.out.port}
 	} else {
 		ip, port, err := getInnerFlowChan(*tc.out, *tc.in)
 		if err != nil {
@@ -382,6 +385,7 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 			// filter incoming packet
 			return nil
 		}
+		utils.Log.Printf("Src addr %s trg addr %s src port %d trg port %d\n", tc.in.addr, ip.String(), tc.in.port, port)
 
 		optPkt := changeFieldsInPacket(packet{pktBuff: pkt, srcAddr: tc.in.addr, srcPort: tc.in.port, trgAddr: *ip, trgPort: port})
 
@@ -404,13 +408,17 @@ func InitNat() {
 	netmask := net.IPv4(255, 255, 255, 0)
 	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
 
+	tmpGIp := getGatewayIP()
+
+	gIp = &tmpGIp
+
 	utils.Log.Printf("Local IP address resolved to: %s\n", lIpStr)
 	utils.Log.Printf("Netmask resolved to: %s\n", netmask)
 
 	pktChan = make(chan packet, 100)
 	cMap = new(chanMap)
 	cMap.im = make(map[uint16]*chanMapVal)
-	cMap.InitSenders(10, pktChan)
+	cMap.InitSenders(2, pktChan)
 	sc = natdb.New(getGatewayIP().String(), 6379)
 }
 
@@ -424,18 +432,21 @@ func StartUDPNat(listenPort int) {
 	}
 	defer conn.Close()
 
+	buff := make([]byte, 65535)
+
 	for {
-		buff := make([]byte, 65535)
 		size, err := conn.Read(buff)
 		if err != nil {
 			utils.Log.Printf("Error reading from UDP socket: %s\n", err)
 			continue
 		}
 
-		go handlePacket(buff[:size], pktChan)
+		ipPkt := header.IPv4(buff[:size])
+		pktBuff, pktBuffSize := ipPkt.Payload(), ipPkt.PayloadLength()
+		udpPkt := header.UDP(pktBuff[:pktBuffSize])
+		pktBuff = udpPkt.Payload()
+		go handlePacket(pktBuff, pktChan)
 	}
-
-	sc.CleanUpSets()
 }
 
 func StartIPInterface(listenPort uint16) {
