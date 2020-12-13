@@ -31,7 +31,7 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 
 	utils.Log.Printf("Starting NAT NF at %s ...", lIp)
 
-	nflib.SendPingMessageToRouter(utils.Log, utils.Log)
+	nflib.SendPingMessageToRouter("nat", utils.Log, utils.Log)
 
 	utils.Log.Println("Starting accepting UDP packets ...")
 	handlers.StartUDPNat(9826)

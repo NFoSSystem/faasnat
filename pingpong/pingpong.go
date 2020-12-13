@@ -23,11 +23,13 @@ func main() {
 	tmp, _ = strconv.Atoi(args[5])
 	trgPort := uint16(tmp)
 
-	if args[1] == "ping" {
-		clientServer(srcAddr, trgAddr, srcPort, trgPort, true)
-	} else {
-		clientServer(srcAddr, trgAddr, srcPort, trgPort, false)
-	}
+	// if args[1] == "ping" {
+	// 	clientServer(srcAddr, trgAddr, srcPort, trgPort, true)
+	// } else {
+	// 	clientServer(srcAddr, trgAddr, srcPort, trgPort, false)
+	// }
+
+	client(srcAddr, trgAddr, srcPort, trgPort)
 }
 
 func IP2Address(addr net.IP) tcpip.Address {
@@ -69,7 +71,7 @@ func clientServer(srcAddr, dstAddr net.IP, srcPort, dstPort uint16, ping bool) {
 		}
 		defer sConn.Close()
 
-		cConn, err := net.DialUDP("udp", nil, &net.UDPAddr{net.IPv4(192, 168, 1, 249), 5000, ""})
+		cConn, err := net.DialUDP("udp", nil, &net.UDPAddr{net.IPv4(192, 168, 1, 160), 5000, ""})
 		if err != nil {
 			log.Fatalf("Error opening UDP socket on port 5000: %s\n", err)
 		}
@@ -79,7 +81,7 @@ func clientServer(srcAddr, dstAddr net.IP, srcPort, dstPort uint16, ping bool) {
 			cConn.Write(tmpPayload)
 			log.Printf("Packet sent from %s:%d to %s:%d\n", srcAddr, srcPort, dstAddr, dstPort)
 
-		inner1:
+			//inner1:
 			buff := make([]byte, 65535)
 
 			_, err := sConn.Read(buff)
@@ -90,11 +92,11 @@ func clientServer(srcAddr, dstAddr net.IP, srcPort, dstPort uint16, ping bool) {
 			rIpPkt := header.IPv4(buff)
 			rUdpPkt := header.UDP(rIpPkt.Payload())
 
-			log.Printf("DEBUG destination port %d - srcPort %d\n", rUdpPkt.DestinationPort(), srcPort)
+			// log.Printf("DEBUG destination port %d - srcPort %d\n", rUdpPkt.DestinationPort(), srcPort)
 
-			if rUdpPkt.DestinationPort() != srcPort {
-				goto inner1
-			}
+			// if rUdpPkt.DestinationPort() != srcPort {
+			// 	goto inner1
+			// }
 			log.Printf("Packet received from %s:%d headed to %s:%v\n", rIpPkt.SourceAddress(), rUdpPkt.SourcePort(),
 				rIpPkt.DestinationAddress(), rUdpPkt.DestinationPort())
 		}
@@ -127,5 +129,49 @@ func clientServer(srcAddr, dstAddr net.IP, srcPort, dstPort uint16, ping bool) {
 			cConn.Write(rUdpPkt.Payload())
 			log.Printf("Packet sent from %s:%d to %s:%d\n", srcAddr, srcPort, dstAddr, dstPort)
 		}
+	}
+}
+
+func client(srcAddr, dstAddr net.IP, srcPort, dstPort uint16) {
+	ipPkt := header.IPv4(msgPayload)
+	ipPkt.SetSourceAddress(IP2Address(srcAddr))
+	ipPkt.SetDestinationAddress(IP2Address(dstAddr))
+	udpPkt := header.UDP(ipPkt.Payload())
+	udpPkt.SetSourcePort(srcPort)
+	udpPkt.SetDestinationPort(dstPort)
+
+	// Calculate UDP Packet checksum
+	xsum := header.PseudoHeaderChecksum(header.UDPProtocolNumber, ipPkt.SourceAddress(), ipPkt.DestinationAddress(),
+		uint16(len(udpPkt)))
+	xsum = header.Checksum(udpPkt.Payload(), xsum)
+	udpPkt.SetChecksum(^udpPkt.CalculateChecksum(xsum))
+
+	// Calculate IP Datagram checksum
+	chksm := ipPkt.CalculateChecksum()
+	ipPkt.SetChecksum(chksm)
+
+	payload := ipPkt.Payload()
+	copy(payload, []byte(udpPkt))
+
+	tmpPayload := []byte(ipPkt)
+
+	natAddr := net.IPv4(192, 168, 1, 160)
+	natPort := 5000
+
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{natAddr, natPort, ""})
+	if err != nil {
+		log.Fatalf("Error opening UDP socket to %s:%d\n", natAddr, natPort)
+	}
+
+	//t := time.NewTicker(time.Millisecond)
+	cnt := 1
+	for {
+		_, err := conn.Write(tmpPayload)
+		if err != nil {
+			log.Printf("Error sending packet via UDP socket: %s\n", err)
+		}
+		go log.Printf("Packet %d sent to %s:%d\n", cnt, dstAddr, dstPort)
+		cnt++
+		//<-t.C
 	}
 }
