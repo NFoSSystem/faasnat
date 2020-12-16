@@ -173,5 +173,5 @@ func client(srcAddr, dstAddr net.IP, srcPort, dstPort uint16) {
 		bytesSent += size
 		cnt++
 	}
-	log.Printf("Bytes sent: %d - Total number of packets sent %d to %s:%d\n", bytesSent, cnt, dstAddr, dstPort)
+	log.Printf("Packets sent: %d - Bytes sent: %d - Destination %s:%d\n", cnt, bytesSent, dstAddr, dstPort)
 }
