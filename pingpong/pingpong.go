@@ -155,7 +155,7 @@ func client(srcAddr, dstAddr net.IP, srcPort, dstPort uint16) {
 
 	tmpPayload := []byte(ipPkt)
 
-	natAddr := net.IPv4(192, 168, 1, 160)
+	natAddr := net.IPv4(192, 168, 1, 102)
 	natPort := 5000
 
 	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{natAddr, natPort, ""})
@@ -163,15 +163,15 @@ func client(srcAddr, dstAddr net.IP, srcPort, dstPort uint16) {
 		log.Fatalf("Error opening UDP socket to %s:%d\n", natAddr, natPort)
 	}
 
-	//t := time.NewTicker(time.Millisecond)
 	cnt := 1
+	bytesSent := 0
 	for {
-		_, err := conn.Write(tmpPayload)
+		size, err := conn.Write(tmpPayload)
 		if err != nil {
-			log.Printf("Error sending packet via UDP socket: %s\n", err)
+			break
 		}
-		go log.Printf("Packet %d sent to %s:%d\n", cnt, dstAddr, dstPort)
+		bytesSent += size
 		cnt++
-		//<-t.C
 	}
+	log.Printf("Bytes sent: %d - Total number of packets sent %d to %s:%d\n", bytesSent, cnt, dstAddr, dstPort)
 }
