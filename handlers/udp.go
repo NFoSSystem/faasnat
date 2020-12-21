@@ -16,6 +16,8 @@ import (
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
+	"github.com/mdlayher/ethernet"
+	"github.com/mdlayher/raw"
 
 	"github.com/howeyc/crc16"
 	"github.com/willf/bitset"
@@ -425,24 +427,44 @@ func init() {
 	sc = natdb.New("localhost", 6379)
 }
 
-func StartUDPNat() {
+func StartUDPNat(interfaceName string) {
 	defer sc.Close()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(0, 0, 0, 0), 5000, ""})
+
+	nif, err := net.InterfaceByName(interfaceName)
 	if err != nil {
-		log.Printf("Error instantiating UDP NAT: %s\n", err)
-		return
+		log.Fatalf("Error accessing to interface %s\n", interfaceName)
 	}
-	defer conn.Close()
+
+	eth, err := raw.ListenPacket(nif, 0x800, nil)
+	if err != nil {
+		log.Fatalf("Error opening ethernet interface: %s\n", err)
+	}
+	defer eth.Close()
+
+	buff := make([]byte, nif.MTU)
+
+	var eFrame ethernet.Frame
 
 	for {
-		buff := make([]byte, 65535)
-		size, err := conn.Read(buff)
+		size, _, err := eth.ReadFrom(buff)
 		if err != nil {
-			log.Printf("Error reading from UDP socket: %s\n", err)
-			continue
+			log.Fatalf("Error reading from ethernet interface: %s\n", err)
 		}
 
-		go handlePacket(buff[:size], pktChan)
+		err = (&eFrame).UnmarshalBinary(buff[:size])
+		if err != nil {
+			log.Fatalf("Error unmarshalling received message: %s\n", err)
+		}
+
+		ipBuff := []byte(eFrame.Payload)
+
+		switch ipBuff[9] {
+		case 17:
+			// UDP
+			go handlePacket(ipBuff, pktChan)
+		default:
+			continue
+		}
 	}
 
 	sc.CleanUpSets()
