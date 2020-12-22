@@ -14,6 +14,7 @@ import (
 
 	"bitbucket.org/Manaphy91/faasnat/natdb"
 	"bitbucket.org/Manaphy91/faasnat/utils"
+	"bitbucket.org/Manaphy91/nflib"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
@@ -401,6 +402,15 @@ func init() {
 		return
 	}
 	lIp = tmpIp
+
+	lIp, _ := nflib.GetLocalIpAddr()
+	strPrefix := fmt.Sprintf("[%s] -> ", lIp.String())
+
+	logger, err := nflib.NewRedisLogger(strPrefix, "logChan", "127.0.0.1", nflib.REDIS_PORT)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	utils.Log = logger
 
 	lIpInt32 = ipv4ToInt32(lIp)
 	lIpStr = lIp.String()
