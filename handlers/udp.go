@@ -15,6 +15,8 @@ import (
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/header"
 	"github.com/howeyc/crc16"
+	"github.com/mdlayher/ethernet"
+	"github.com/mdlayher/raw"
 	"github.com/willf/bitset"
 )
 
@@ -56,7 +58,7 @@ type udpMapping struct {
 	i2oMap map[uint16]mappingVal
 	o2iMap map[uint16]mappingVal
 	mv2tc  map[*mappingVal]*tupleCouple
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	bSet   *bitset.BitSet
 }
 
@@ -152,45 +154,62 @@ func init() {
 	lIpInt32 = ipv4ToInt32(lIp)
 	lIpStr = lIp.String()
 	netmask := net.IPv4(255, 255, 255, 0)
-	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
+	iIp := net.IPv4(10, 10, 2, 1)
+	isInSameSubnet = getSameSubnetFunction(&iIp, &netmask)
 
 	log.Printf("Local IP address resolved to: %s\n", lIpStr)
 	log.Printf("Netmask resolved to: %s\n", netmask)
 }
 
-func StartUDPNat() {
+func StartUDPNat(interfaceName string) {
 	um := new(udpMapping)
 	um.i2oMap = make(map[uint16]mappingVal)
 	um.o2iMap = make(map[uint16]mappingVal)
 	um.mv2tc = make(map[*mappingVal]*tupleCouple)
 	um.bSet = bitset.New(65535)
 
-	//conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(0, 0, 0, 0), ""})
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(127, 0, 0, 1), 5000, ""})
+	nif, err := net.InterfaceByName(interfaceName)
 	if err != nil {
-		log.Printf("Error instantiating UDP NAT: %s\n", err)
-		return
+		log.Fatalf("Error accessing to interface %s\n", interfaceName)
 	}
 
+	eth, err := raw.ListenPacket(nif, 0x800, nil)
+	if err != nil {
+		log.Fatalf("Error opening ethernet interface: %s\n", err)
+	}
+	defer eth.Close()
+
+	buff := make([]byte, nif.MTU)
+
+	var eFrame ethernet.Frame
+
 	for {
-		buff := make([]byte, 65535)
-		size, err := conn.Read(buff)
+		size, _, err := eth.ReadFrom(buff)
 		if err != nil {
-			log.Printf("Error reading from UDP socket: %s\n", err)
-			continue
+			log.Fatalf("Error reading from ethernet interface: %s\n", err)
 		}
 
-		ipv4 := header.IPv4(buff[:size])
-		log.Printf("Packet received from %s headed to %s\n", ipv4.SourceAddress(), ipv4.DestinationAddress())
+		err = (&eFrame).UnmarshalBinary(buff[:size])
+		if err != nil {
+			log.Fatalf("Error unmarshalling received message: %s\n", err)
+		}
 
-		go um.handlePacket(buff[:size])
+		ipBuff := []byte(eFrame.Payload)
+
+		switch ipBuff[9] {
+		case 17:
+			// UDP
+			go um.handlePacket(ipBuff)
+		default:
+			continue
+		}
 	}
 
 }
 
 func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
 	log.Printf("Opening socket for %s:%d\n", dstAddr.String(), dstPort)
-	conn, err := net.Dial("ip4:udp", dstAddr.String())
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{*dstAddr, int(dstPort), ""})
 	if err != nil {
 		log.Printf("Error opening UDP connection to host %s: %s\n", dstAddr, err)
 		return
@@ -202,8 +221,11 @@ func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
 	for {
 		select {
 		case pkt := <-mv.flow:
-			log.Printf("---------------> Packet sent to %s:%d\n", dstAddr.String(), dstPort)
-			conn.Write(pkt)
+			//log.Printf("---------------> Packet sent to %s:%d\n", dstAddr.String(), dstPort)
+			_, err = conn.Write(pkt)
+			if err != nil {
+				log.Printf("Error sending packet to %s:%d: %s\n", dstAddr.String(), dstPort, err)
+			}
 			tmp := time.Now()
 			mv.lastUseTime = &tmp
 			continue
@@ -221,22 +243,24 @@ func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
 }
 
 func (um *udpMapping) getOuterFlowChan(it, ot tuple) chan packet {
-	um.mu.Lock()
-
-	if val, ok := um.i2oMap[getCrc16FromIPAndPort(&it.addr, it.port)]; !ok {
+	crcRes := getCrc16FromIPAndPort(&it.addr, it.port)
+	um.mu.RLock()
+	if val, ok := um.i2oMap[crcRes]; !ok {
+		um.mu.RUnlock()
 		mv := mappingVal{}
 		mv.flow = make(chan packet)
 		mv.stop = make(chan struct{})
 		tc := new(tupleCouple)
 		tc.in = &it
 		tc.out = &ot
+		um.mu.Lock()
 		tmp, err := um.getFirstAvailablePort(&it)
 		if err != nil {
 			log.Println("ERROR all available UDP ports are used!")
 			return nil
 		}
 		mv.port = tmp
-		um.i2oMap[getCrc16FromIPAndPort(&it.addr, it.port)] = mv
+		um.i2oMap[crcRes] = mv
 
 		addrSlice := make([]byte, len([]byte(it.addr))+len([]byte(ot.addr)))
 		addrSlice = append(addrSlice, []byte(it.addr)...)
@@ -245,12 +269,12 @@ func (um *udpMapping) getOuterFlowChan(it, ot tuple) chan packet {
 		um.o2iMap[cks] = mv
 		um.mv2tc[&mv] = tc
 		um.mu.Unlock()
-		go mv.sendPkt(&it.addr, it.port)
+		go mv.sendPkt(&ot.addr, ot.port)
 		return mv.flow
 	} else {
 		tmp := time.Now()
 		val.lastUseTime = &tmp
-		um.mu.Unlock()
+		um.mu.RUnlock()
 		return val.flow
 	}
 }
@@ -326,18 +350,15 @@ func (um *udpMapping) handlePacket(ipPkt packet) error {
 		return fmt.Errorf("Error packet provided in input is null or empty!")
 	}
 
-	tc, err := getTupleFromUDPPacket(pkt, header.UDP(pkt.Payload()))
+	udpPkt := header.UDP(pkt.Payload())
+	tc, err := getTupleFromUDPPacket(pkt, udpPkt)
 	if err != nil {
 		return err
 	}
 
 	ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
 
-	if !isInSameSubnet(&ipAddr) {
-		return nil
-	}
-
-	log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
+	//log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
 
 	var pktChan chan packet
 
@@ -347,15 +368,14 @@ func (um *udpMapping) handlePacket(ipPkt packet) error {
 			return nil
 		}
 		//log.Println("------------> Packet sent to outer flow")
-		pktChan <- packet(pkt)
+		pktChan <- packet(udpPkt.Payload())
 	} else {
-		//log.Printf("Address %s and %s don't belong to the same subnet!\n", lIpStr, tc.in.addr)
 		pktChan = um.getInnerFlowChan(*tc.out, *tc.in)
 		if pktChan == nil {
 			return nil
 		}
-		//log.Println("------------> Packet sent to inner flow")
-		pktChan <- packet(pkt)
+		log.Println("------------> Packet sent to inner flow")
+		//pktChan <- packet(udpPkt.Payload())
 	}
 
 	return nil
