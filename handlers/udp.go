@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	UDP_CONNECTION_TIMEOUT_IN_SECONDS = 120
+	UDP_CONNECTION_TIMEOUT_IN_SECONDS = 185
 	ROUTE_FILENAME                    = "/proc/net/route"
 	GATEWAY_LINE                      = 2    // line containing the gateway addr. (first line: 0)
 	SEP                               = "\t" // field separator
@@ -104,7 +104,7 @@ func getLocalIpAddr() (*net.IP, error) {
 
 func ipv4ToInt32(ip *net.IP) uint32 {
 	ipB := []byte(*ip)
-	return uint32(ipB[12]<<24) | uint32(ipB[13]<<16) | uint32(ipB[13]<<8) | uint32(ipB[13])
+	return uint32(ipB[12])<<24 | uint32(ipB[13])<<16 | uint32(ipB[14])<<8 | uint32(ipB[15])
 }
 
 func getSameSubnetFunction(lIpAddr, netmaskAddr *net.IP) func(addr *net.IP) bool {
@@ -114,6 +114,14 @@ func getSameSubnetFunction(lIpAddr, netmaskAddr *net.IP) func(addr *net.IP) bool
 	return func(addr *net.IP) bool {
 		addrInt32 := ipv4ToInt32(addr)
 		return (addrInt32 & netmask) == res
+	}
+}
+
+func isEqualToIp(ipAddr *net.IP) func(*net.IP) bool {
+	src := ipv4ToInt32(ipAddr)
+
+	return func(dest *net.IP) bool {
+		return src == ipv4ToInt32(dest)
 	}
 }
 
@@ -143,6 +151,8 @@ var lIp *net.IP
 var lIpInt32 uint32
 var lIpStr string
 var isInSameSubnet func(*net.IP) bool
+var isEqualToSrcIp func(*net.IP) bool
+var isEqualToSrcIp2 func(*net.IP) bool
 
 func init() {
 	lIp, err := getLocalIpAddr()
@@ -154,20 +164,31 @@ func init() {
 	lIpInt32 = ipv4ToInt32(lIp)
 	lIpStr = lIp.String()
 	netmask := net.IPv4(255, 255, 255, 0)
-	iIp := net.IPv4(10, 10, 2, 1)
+	iIp := net.IPv4(10, 10, 1, 2)
+	iIp2 := net.IPv4(10, 10, 2, 1)
 	isInSameSubnet = getSameSubnetFunction(&iIp, &netmask)
+	isEqualToSrcIp = isEqualToIp(&iIp)
+	isEqualToSrcIp2 = isEqualToIp(&iIp2)
 
 	log.Printf("Local IP address resolved to: %s\n", lIpStr)
 	log.Printf("Netmask resolved to: %s\n", netmask)
 }
 
-func StartUDPNat(interfaceName string) {
+func StartUDPNat(interfaces []string) {
+	stopChan := make(chan struct{})
 	um := new(udpMapping)
 	um.i2oMap = make(map[uint16]mappingVal)
 	um.o2iMap = make(map[uint16]mappingVal)
 	um.mv2tc = make(map[*mappingVal]*tupleCouple)
 	um.bSet = bitset.New(65535)
 
+	for _, nf := range interfaces {
+		go startUDPNatHelper(nf, um)
+	}
+	<-stopChan
+}
+
+func startUDPNatHelper(interfaceName string, um *udpMapping) {
 	nif, err := net.InterfaceByName(interfaceName)
 	if err != nil {
 		log.Fatalf("Error accessing to interface %s\n", interfaceName)
@@ -232,7 +253,7 @@ func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
 		case <-mv.stop:
 			return
 		case <-timer.C:
-			if deltaTime := time.Since(*mv.lastUseTime) * time.Second; deltaTime <= UDP_CONNECTION_TIMEOUT_IN_SECONDS {
+			if deltaTime := time.Since(*mv.lastUseTime) / time.Second; deltaTime <= UDP_CONNECTION_TIMEOUT_IN_SECONDS {
 				timer = time.NewTimer((UDP_CONNECTION_TIMEOUT_IN_SECONDS - deltaTime) * time.Second)
 				continue
 			} else {
@@ -362,20 +383,18 @@ func (um *udpMapping) handlePacket(ipPkt packet) error {
 
 	var pktChan chan packet
 
-	if isInSameSubnet(&ipAddr) {
+	if isEqualToSrcIp(&ipAddr) || isEqualToSrcIp2(&ipAddr) {
 		pktChan = um.getOuterFlowChan(*tc.in, *tc.out)
 		if pktChan == nil {
 			return nil
 		}
-		//log.Println("------------> Packet sent to outer flow")
 		pktChan <- packet(udpPkt.Payload())
 	} else {
 		pktChan = um.getInnerFlowChan(*tc.out, *tc.in)
 		if pktChan == nil {
 			return nil
 		}
-		log.Println("------------> Packet sent to inner flow")
-		//pktChan <- packet(udpPkt.Payload())
+		pktChan <- packet(udpPkt.Payload())
 	}
 
 	return nil
