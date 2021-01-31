@@ -242,7 +242,6 @@ func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
 	for {
 		select {
 		case pkt := <-mv.flow:
-			//log.Printf("---------------> Packet sent to %s:%d\n", dstAddr.String(), dstPort)
 			_, err = conn.Write(pkt)
 			if err != nil {
 				log.Printf("Error sending packet to %s:%d: %s\n", dstAddr.String(), dstPort, err)
