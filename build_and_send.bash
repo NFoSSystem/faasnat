@@ -9,6 +9,8 @@ zip nat-src.zip -qr *
 
 docker run -i openwhisk/action-golang-v1.15 -compile main <nat-src.zip >nat-bin.zip
 
+# cp nat-bin.zip /home/alessandro/Documenti/varie/goprojects/provisioner/.
+
 #sshpass -p #password# scp nat-bin.zip #destination#
 
 cd $currDir

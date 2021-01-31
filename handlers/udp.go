@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"nflib"
 	"os"
 	"strconv"
 	"strings"
@@ -159,6 +160,9 @@ var pktChan chan packet
 var cMap *chanMap
 var sc *natdb.SharedContext
 
+var PacketChan chan nflib.Packet
+var GetFirstAvailablePort func(port uint16) uint16
+
 func (cm *chanMap) GetConn(srcAddr, trgAddr *net.IP, srcPort, trgPort uint16) (*net.UDPConn, error) {
 	cm.mu.Lock()
 	crc := crc16.ChecksumIBM([]byte(*trgAddr))
@@ -213,71 +217,63 @@ func (cm *chanMap) sendPkt(pktChan chan packet) {
 			if err != nil {
 				utils.Log.Printf("Error writing to socket headed to %s:%d: %s\n", pkt.trgAddr, pkt.trgPort, err)
 			}
-			utils.Log.Printf("Sent packet %s:%d to %s:%d\n", pkt.srcAddr, pkt.srcPort, pkt.trgAddr, pkt.trgPort)
 			continue
 		}
 	}
 }
 
-func getOuterFlowChan(it, ot tuple) (uint16, error) {
+type FlowVal struct {
+	addr *net.IP
+	port uint16
+}
+
+type FlowMap struct {
+	mu sync.RWMutex
+	im map[uint16]*FlowVal
+}
+
+func NewFlowMap() *FlowMap {
+	res := new(FlowMap)
+	res.im = make(map[uint16]*FlowVal)
+	return res
+}
+
+func (fm *FlowMap) Set(crc16 uint16, addr *net.IP, port uint16) {
+	fm.mu.Lock()
+	fm.im[crc16] = &FlowVal{addr, port}
+	fm.mu.Unlock()
+}
+
+func (fm *FlowMap) Get(crc16 uint16) *FlowVal {
+	fm.mu.RLock()
+	if val, ok := fm.im[crc16]; !ok {
+		fm.mu.RUnlock()
+		return nil
+	} else {
+		fm.mu.RUnlock()
+		return val
+	}
+}
+
+func getOuterFlowChan(it, ot tuple, outFlowMap, inFlowMap *FlowMap) (uint16, error) {
 	inCrc := getCrc16FromIPAndPort(&it.addr, it.port)
-	lock, err := sc.OutFlowLock(it.port)
-	if err != nil {
-		return 0, fmt.Errorf("Error obtaining OutFlowLock: %s\n", err)
-	}
 
-	ip, port, err := sc.GetOutAddrPortCouple(inCrc)
-	if err != nil {
-		err = fmt.Errorf("Error searching data from Redis Set: %s\n", err)
-		if err := sc.OutFlowUnLock(lock); err != nil {
-			return 0, err
-		}
-		return 0, err
-	}
+	val := outFlowMap.Get(inCrc)
 
-	if err := sc.OutFlowUnLock(lock); err != nil {
-		return 0, err
-	}
+	if val == nil {
 
-	if ip == nil {
-		outPort, err := sc.GetFirstAvailablePort(it.port)
-		if err != nil {
-			return 0, err
+		outPort := GetFirstAvailablePort(it.port)
+		if outPort == 0 {
+			return 0, fmt.Errorf("Error assigning out port: port returned 0")
 		}
 
-		lock, err := sc.OutFlowLock(it.port)
-		if err != nil {
-			return 0, fmt.Errorf("Error obtaining OutFlowLock: %s\n", err, it.addr, it.port)
-		}
+		outFlowMap.Set(inCrc, lIp, outPort)
 
-		if err := sc.SetOutAddrPortCouple(inCrc, lIp, outPort); err != nil {
-			return 0, err
-		}
-
-		if err := sc.OutFlowUnLock(lock); err != nil {
-			return 0, err
-		}
-
-		go func() {
-			addrSlice := make([]byte, len([]byte(*lIp))+len([]byte(ot.addr)))
-			addrSlice = append(addrSlice, []byte(*lIp)...)
-			addrSlice = append(addrSlice, []byte(ot.addr)...)
-			outCrc := crc16.ChecksumIBM(addrSlice)
-
-			lock, err := sc.InFlowLock(ot.port)
-			if err != nil {
-				utils.Log.Println("Error acquiring InFlowLock: %s\n", err)
-				return
-			}
-			sc.SetInAddrPortCouple(outCrc, &it.addr, it.port)
-			if err := sc.InFlowUnLock(lock); err != nil {
-				utils.Log.Println("Error releasing InFlowLock: %s\n", err)
-			}
-		}()
+		PacketChan <- nflib.Packet{nflib.Ipv4ToInt32(lIp), inCrc, outPort}
 
 		return outPort, nil
 	} else {
-		return port, nil
+		return val.port, nil
 	}
 }
 
@@ -344,7 +340,7 @@ func (cm *chanMap) InitSenders(num uint8, pktChan chan packet) {
 	}
 }
 
-func handlePacket(ipPkt []byte, pktChan chan packet) error {
+func handlePacket(ipPkt []byte, pktChan chan packet, outFlowMap, inFlowMap *FlowMap) error {
 	pkt := header.IPv4(ipPkt)
 
 	if pkt == nil || len(pkt) == 0 || pkt.Payload() == nil || len(pkt.Payload()) == 0 {
@@ -357,9 +353,9 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 		return err
 	}
 
-	ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
+	udpPkt := header.UDP(pkt.Payload())
 
-	utils.Log.Printf("Packet received from %s:%d headed to %s:%d\n", tc.in.addr, tc.in.port, tc.out.addr, tc.out.port)
+	ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
 
 	// TO BE REMOVED - START
 	ip := net.IPv4(192, 168, 1, 102)
@@ -367,13 +363,13 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 	// TO BE REMOVED - END
 
 	if isInSameSubnet(&ipAddr) && destIp != ipv4ToInt32(&ipAddr) {
-		port, err := getOuterFlowChan(*tc.in, *tc.out)
+		port, err := getOuterFlowChan(*tc.in, *tc.out, outFlowMap, inFlowMap)
 		if err != nil {
 			utils.Log.Println(err)
 			return nil
 		}
 
-		pktChan <- packet{pktBuff: pkt, srcAddr: *gIp, srcPort: port, trgAddr: tc.out.addr, trgPort: tc.out.port}
+		pktChan <- packet{pktBuff: udpPkt.Payload(), srcAddr: *gIp, srcPort: port, trgAddr: tc.out.addr, trgPort: tc.out.port}
 	} else {
 		ip, port, err := getInnerFlowChan(*tc.out, *tc.in)
 		if err != nil {
@@ -385,7 +381,6 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 			// filter incoming packet
 			return nil
 		}
-		utils.Log.Printf("Src addr %s trg addr %s src port %d trg port %d\n", tc.in.addr, ip.String(), tc.in.port, port)
 
 		optPkt := changeFieldsInPacket(packet{pktBuff: pkt, srcAddr: tc.in.addr, srcPort: tc.in.port, trgAddr: *ip, trgPort: port})
 
@@ -395,7 +390,7 @@ func handlePacket(ipPkt []byte, pktChan chan packet) error {
 	return nil
 }
 
-func InitNat() {
+func InitNat(ports []uint16) {
 	tmpIp, err := getLocalIpAddr()
 	if err != nil {
 		utils.Log.Printf("Error obtaining local IP address: %s\n", err)
@@ -418,18 +413,48 @@ func InitNat() {
 	pktChan = make(chan packet, 100)
 	cMap = new(chanMap)
 	cMap.im = make(map[uint16]*chanMapVal)
-	cMap.InitSenders(2, pktChan)
+	cMap.InitSenders(10, pktChan)
 	sc = natdb.New(getGatewayIP().String(), 6379)
+
+	var mu sync.Mutex
+	var lowerPtr, upperPtr int = 0, 0
+	for i := 0; i < len(ports); i++ {
+		if ports[i] > 1023 {
+			upperPtr = i
+			break
+		}
+	}
+
+	GetFirstAvailablePort = func(port uint16) uint16 {
+		mu.Lock()
+		var res uint16 = 0
+		if port < 1024 {
+			res = ports[lowerPtr]
+			if len(ports) > 1 {
+				ports = ports[lowerPtr+1:]
+			}
+			lowerPtr++
+		} else {
+			res = ports[upperPtr]
+			if len(ports) > upperPtr {
+				ports = append(ports[:upperPtr], ports[upperPtr+1:]...)
+			}
+			upperPtr++
+		}
+		mu.Unlock()
+		return res
+	}
 }
 
-func StartUDPNat(listenPort int) {
-	InitNat()
+func StartUDPNat(listenPort int, ports []uint16, outFlowMap, inFlowMap *FlowMap) {
+	InitNat(ports)
 	defer sc.Close()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(0, 0, 0, 0), listenPort, ""})
 	if err != nil {
 		utils.Log.Printf("Error instantiating UDP NAT: %s\n", err)
 		return
 	}
+
 	defer conn.Close()
 
 	buff := make([]byte, 65535)
@@ -441,15 +466,11 @@ func StartUDPNat(listenPort int) {
 			continue
 		}
 
-		ipPkt := header.IPv4(buff[:size])
-		pktBuff, pktBuffSize := ipPkt.Payload(), ipPkt.PayloadLength()
-		udpPkt := header.UDP(pktBuff[:pktBuffSize])
-		pktBuff = udpPkt.Payload()
-		go handlePacket(pktBuff, pktChan)
+		go handlePacket(buff[:size], pktChan, outFlowMap, inFlowMap)
 	}
 }
 
-func StartIPInterface(listenPort uint16) {
+func StartIPInterface(listenPort uint16, outFlowMap, inFlowMap *FlowMap) {
 	conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(0, 0, 0, 0), ""})
 	if err != nil {
 		utils.Log.Printf("Error opening connection on IP interface: %s\n", err)
@@ -481,7 +502,7 @@ func StartIPInterface(listenPort uint16) {
 			continue
 		}
 
-		go handlePacket(buff[:size], pktChan)
+		go handlePacket(buff[:size], pktChan, outFlowMap, inFlowMap)
 	}
 
 }
