@@ -229,7 +229,7 @@ func startUDPNatHelper(interfaceName string, um *udpMapping) {
 }
 
 func (mv *mappingVal) sendPkt(dstAddr *net.IP, dstPort uint16) {
-	log.Printf("Opening socket for %s:%d\n", dstAddr.String(), dstPort)
+	log.Printf("Opening socket for %s:%d - Start time: %d\n", dstAddr.String(), dstPort, time.Now().UnixNano())
 	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{*dstAddr, int(dstPort), ""})
 	if err != nil {
 		log.Printf("Error opening UDP connection to host %s: %s\n", dstAddr, err)
