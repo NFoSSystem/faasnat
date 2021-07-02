@@ -36,6 +36,7 @@ func GetGatewayIP() net.IP {
 	ipd32 := make(net.IP, 4)
 	binary.LittleEndian.PutUint32(ipd32, d32)
 	return net.IP(ipd32)
+	//return net.ParseIP("172.17.0.3")
 }
 
 /*
@@ -104,21 +105,22 @@ var GetIPsFromPkt func([]byte) (net.IP, net.IP, error) = GetIPsFromBytes(UDP_IP_
 /*
 Send ping message to the gateway
 */
-func SendPingMessageToRouter(actionName string, debugLog *log.Logger, errLog *log.Logger) {
+func SendPingMessageToRouter(actionName string, debugLog *log.Logger, errLog *log.Logger, cntId uint16, repl bool) {
+	rIp := GetGatewayIP()
 	lIp, err := GetLocalIpAddr()
 	if err != nil {
 		errLog.Println(err)
 	}
 
 	port := 9082
-	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{net.IPv4(172, 17, 0, 1), port, ""})
+	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{rIp, port, ""})
 	if err != nil {
-		errLog.Printf("Error opening TCP connection to ip %s and port %d. Action will be terminated.\n", net.IPv4(172, 17, 0, 1), port)
+		errLog.Printf("Error opening TCP connection to ip %s and port %d. Action will be terminated.\n", rIp, port)
 	}
 
-	debugLog.Printf("Ping message sent to IP %s at port %d\n", net.IPv4(172, 17, 0, 1), port)
+	//debugLog.Printf("Ping message sent to IP %s at port %d\n", rIp, port)
 
-	pkt := NewMsg(lIp, actionName, 9826)
+	pkt := NewMsg(lIp, actionName, 9826, cntId, repl)
 	tBuff := GetBytesFromMsg(*pkt)
 
 	conn.Write(tBuff)

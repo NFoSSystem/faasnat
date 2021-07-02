@@ -48,10 +48,10 @@ func GetBytesFromPacket(src Packet) []byte {
 	return buff.Bytes()
 }
 
-func SendToRouter(pktChan chan Packet, addr *net.IP, port uint16, logger *log.Logger) {
+func SendToRouter(pktChan chan Packet, addr *net.IP, port uint16) {
 	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{*addr, int(port), ""})
 	if err != nil {
-		logger.Fatalf("Error opening TCP socket to %s:%d: %s\n", addr.String(), port)
+		log.Fatalf("Error opening TCP socket to %s:%d: %s\n", addr.String(), port)
 	}
 	defer conn.Close()
 
@@ -60,7 +60,7 @@ func SendToRouter(pktChan chan Packet, addr *net.IP, port uint16, logger *log.Lo
 		case pkt := <-pktChan:
 			_, err := conn.Write(GetBytesFromPacket(pkt))
 			if err != nil {
-				logger.Fatalf("Error writing mapping message to %s:%d: %s", addr.String(), port, err)
+				log.Fatalf("Error writing mapping message to %s:%d: %s", addr.String(), port, err)
 			}
 		default:
 			continue
