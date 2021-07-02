@@ -36,6 +36,7 @@ func GetGatewayIP() net.IP {
 	ipd32 := make(net.IP, 4)
 	binary.LittleEndian.PutUint32(ipd32, d32)
 	return net.IP(ipd32)
+	//return net.ParseIP("172.17.0.3")
 }
 
 /*
@@ -117,7 +118,7 @@ func SendPingMessageToRouter(actionName string, debugLog *log.Logger, errLog *lo
 		errLog.Printf("Error opening TCP connection to ip %s and port %d. Action will be terminated.\n", rIp, port)
 	}
 
-	debugLog.Printf("Ping message sent to IP %s at port %d\n", rIp, port)
+	//debugLog.Printf("Ping message sent to IP %s at port %d\n", rIp, port)
 
 	pkt := NewMsg(lIp, actionName, 9826)
 	tBuff := GetBytesFromMsg(*pkt)
