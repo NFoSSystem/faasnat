@@ -4,11 +4,11 @@ import (
 	// "log"
 	// "nflib"
 	// "utils"
+	"encoding/base64"
 	"fmt"
 	"handlers"
 	"log"
 	"nflib"
-	"strconv"
 	"utils"
 )
 
@@ -31,42 +31,28 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 
 	//utils.Log.Println("Getting list of available ports ...")
 
-	portsParam, ok := obj["leasedPorts"].(string)
-	if !ok {
-		utils.Log.Fatalln("Error reading ports from function input paramters")
-	}
+	// portsParam, ok := obj["leasedPorts"].(string)
+	// if !ok {
+	// 	utils.Log.Fatalln("Error reading ports from function input paramters")
+	// }
 
-	ports := nflib.GetPortSliceFromString(portsParam)
+	//ports := nflib.GetPortSliceFromString(portsParam)
 
 	//utils.Log.Println("Starting accepting UDP packets ...")
+	handlers.InitNat()
 
-	var outFlowMap, inFlowMap *handlers.FlowMap = handlers.NewFlowMap(), handlers.NewFlowMap()
-
-	cntIdStr, ok := obj["cntId"].(string)
-	if !ok {
-		utils.Log.Fatalf("Error reading cntId from function input paramters: %v - %s", obj, cntIdStr)
-	}
-
-	cntId, err := strconv.Atoi(cntIdStr)
-	if err != nil {
-		utils.Log.Fatalf("Error converting string %s into integer: %s", cntIdStr, err)
-	}
-
-	replStr, ok := obj["repl"].(string)
-	if !ok {
-		utils.Log.Fatalf("Error reading repl from function input paramters: %v - %s", obj, cntIdStr)
-	}
-
-	var repl bool
-
-	//utils.Log.Printf("DEBUG Content of replStr as received from openwhisk %s\n", replStr)
-	if replStr == "0" {
-		repl = false
+	if pktParam, ok := obj["pkt"]; !ok {
+		utils.Log.Printf("ERROR no parameter pkt sent to nat action! The action will return.")
 	} else {
-		repl = true
+		if pktStr, ok := pktParam.(string); ok {
+			pkt, err := base64.StdEncoding.DecodeString(pktStr)
+			if err == nil {
+				go handlers.HandlePacket(pkt)
+			} else {
+				utils.Log.Printf("ERROR during deconding of pkt param: %s", err)
+			}
+		}
 	}
-
-	handlers.StartUDPNat(9826, ports, outFlowMap, inFlowMap, uint16(cntId), repl)
 
 	res := make(map[string]interface{})
 	return res

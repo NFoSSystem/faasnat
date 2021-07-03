@@ -131,6 +131,7 @@ func getSameSubnetFunction(lIpAddr, netmaskAddr *net.IP) func(addr *net.IP) bool
 	res := ipv4ToInt32(lIpAddr) & netmask
 
 	return func(addr *net.IP) bool {
+		utils.Log.Print("DEBUG enter in sameSubnetFunction")
 		addrInt32 := ipv4ToInt32(addr)
 		return (addrInt32 & netmask) == res
 	}
@@ -384,7 +385,7 @@ func (cm *chanMap) InitSenders(num uint8, pktChan chan packet) {
 	}
 }
 
-func handlePacket(ipPkt []byte, pktChan chan packet, outFlowMap, inFlowMap *FlowMap) error {
+func HandlePacket(ipPkt []byte) error {
 	pkt := header.IPv4(ipPkt)
 
 	if pkt == nil || len(pkt) == 0 || pkt.Payload() == nil || len(pkt.Payload()) == 0 {
@@ -398,44 +399,66 @@ func handlePacket(ipPkt []byte, pktChan chan packet, outFlowMap, inFlowMap *Flow
 	}
 
 	udpPkt := header.UDP(pkt.Payload())
-	ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
+	//ipAddr := net.IPv4(ipPkt[12], ipPkt[13], ipPkt[14], ipPkt[15])
 
 	// TO BE REMOVED - START
 	// ip := net.IPv4(10, 10, 1, 1)
 	// destIp := ipv4ToInt32(&ip)
 	// TO BE REMOVED - END
 
-	if isInSameSubnet(&ipAddr) /*&& destIp != ipv4ToInt32(&ipAddr)*/ {
-		port, err := getOuterFlowChan(*tc.in, *tc.out, outFlowMap, inFlowMap)
+	if true /*isInSameSubnet(&ipAddr) /*&& destIp != ipv4ToInt32(&ipAddr)*/ {
+		// port, err := getOuterFlowChan(*tc.in, *tc.out, outFlowMap, inFlowMap)
+		// if err != nil {
+		// 	utils.Log.Println(err)
+		// 	return nil
+		// }
+
+		//conn, err := net.DialUDP("udp", &net.UDPAddr{*lIp, 1025, ""}, &net.UDPAddr{destIp1, int(tc.out.port), ""})
+		conn, err := net.DialUDP("udp", nil, &net.UDPAddr{destIp1, int(tc.out.port), ""})
 		if err != nil {
-			utils.Log.Println(err)
-			return nil
+			return err
+		}
+
+		_, err = conn.Write(udpPkt.Payload())
+		if err != nil {
+			utils.Log.Printf("Error writing to socket headed to %s:%d: %s\n", destIp1, tc.out.port, err)
 		}
 
 		//pktChan <- packet{pktBuff: udpPkt.Payload(), srcAddr: *gIp, srcPort: port, trgAddr: tc.out.addr, trgPort: tc.out.port}
-		pktChan <- packet{pktBuff: udpPkt.Payload(), srcAddr: *gIp, srcPort: port, trgAddr: destIp1, trgPort: tc.out.port}
+		//pktChan <- packet{pktBuff: udpPkt.Payload(), srcAddr: *gIp, srcPort: port, trgAddr: destIp1, trgPort: tc.out.port}
 	} else {
-		val, err := getInnerFlowChan(*tc.out, *tc.in, outFlowMap, inFlowMap)
+		utils.Log.Printf("DEBUG Enter here 7")
+		//val, err := getInnerFlowChan(*tc.out, *tc.in, outFlowMap, inFlowMap)
+		// if err != nil {
+		// 	utils.Log.Println(err)
+		// 	return nil
+		// }
+
+		// if val == nil {
+		// 	//utils.Log.Println("DEBUG Exit here")
+		// 	// filter incoming packet
+		// 	return nil
+		// }
+
+		conn, err := net.DialUDP("udp", &net.UDPAddr{*lIp, int(tc.in.port), ""}, &net.UDPAddr{tc.in.addr, int(tc.in.port), ""})
 		if err != nil {
-			utils.Log.Println(err)
-			return nil
+			return err
 		}
 
-		if val == nil {
-			//utils.Log.Println("DEBUG Exit here")
-			// filter incoming packet
-			return nil
+		_, err = conn.Write(udpPkt.Payload())
+		if err != nil {
+			utils.Log.Printf("Error writing to socket headed to %s:%d: %s\n", destIp1, tc.out.port, err)
 		}
 
 		// optPkt := changeFieldsInPacket(packet{pktBuff: pkt, srcAddr: tc.in.addr, srcPort: tc.in.port, trgAddr: *ip, trgPort: port})
 		// pktChan <- packet(optPkt)
-		pktChan <- packet{pktBuff: udpPkt.Payload(), srcAddr: tc.in.addr, srcPort: tc.in.port, trgAddr: *val.addr, trgPort: val.port}
+		//pktChan <- packet{pktBuff: udpPkt.Payload(), srcAddr: tc.in.addr, srcPort: tc.in.port, trgAddr: *val.addr, trgPort: val.port}
 	}
 
 	return nil
 }
 
-func InitNat(ports []uint16) {
+func InitNat() {
 	tmpIp, err := getLocalIpAddr()
 	if err != nil {
 		utils.Log.Printf("Error obtaining local IP address: %s\n", err)
@@ -445,12 +468,13 @@ func InitNat(ports []uint16) {
 
 	lIpInt32 = ipv4ToInt32(lIp)
 	lIpStr = lIp.String()
-	netmask := net.IPv4(255, 255, 255, 0)
-	isInSameSubnet = getSameSubnetFunction(lIp, &netmask)
+	//netmask := net.IPv4(255, 255, 255, 0)
 
 	tmpGIp := getGatewayIP()
 
 	gIp = &tmpGIp
+
+	//isInSameSubnet = getSameSubnetFunction(gIp, &netmask)
 
 	tmpRIp := net.ParseIP("10.10.1.1")
 	rIp = &tmpRIp
@@ -458,44 +482,41 @@ func InitNat(ports []uint16) {
 	// utils.Log.Printf("Local IP address resolved to: %s\n", lIpStr)
 	// utils.Log.Printf("Netmask resolved to: %s\n", netmask)
 
-	pktChan = make(chan packet, 100)
-	cMap = new(chanMap)
-	cMap.im = make(map[uint16]*chanMapVal)
-	cMap.InitSenders(10, pktChan)
+	//cMap.InitSenders(10, pktChan)
 	sc = natdb.New(getGatewayIP().String(), 6379)
 
-	var mu sync.Mutex
-	var lowerPtr, upperPtr int = 0, 0
-	for i := 0; i < len(ports); i++ {
-		if ports[i] > 1023 {
-			upperPtr = i
-			break
-		}
-	}
+	// var mu sync.Mutex
+	// var lowerPtr, upperPtr int = 0, 0
+	// for i := 0; i < len(ports); i++ {
+	// 	if ports[i] > 1023 {
+	// 		upperPtr = i
+	// 		break
+	// 	}
+	// }
 
-	GetFirstAvailablePort = func(port uint16) uint16 {
-		mu.Lock()
-		var res uint16 = 0
-		if port < 1024 {
-			res = ports[lowerPtr]
-			if len(ports) > 1 {
-				ports = ports[lowerPtr+1:]
-			}
-			lowerPtr++
-		} else {
-			res = ports[upperPtr]
-			if len(ports) > upperPtr {
-				ports = append(ports[:upperPtr], ports[upperPtr+1:]...)
-			}
-			upperPtr++
-		}
-		mu.Unlock()
-		return res
-	}
+	// GetFirstAvailablePort = func(port uint16) uint16 {
+	// 	mu.Lock()
+	// 	var res uint16 = 0
+	// 	if port < 1024 {
+	// 		res = ports[lowerPtr]
+	// 		if len(ports) > 1 {
+	// 			ports = ports[lowerPtr+1:]
+	// 		}
+	// 		lowerPtr++
+	// 	} else {
+	// 		res = ports[upperPtr]
+	// 		if len(ports) > upperPtr {
+	// 			ports = append(ports[:upperPtr], ports[upperPtr+1:]...)
+	// 		}
+	// 		upperPtr++
+	// 	}
+	// 	mu.Unlock()
+	// 	return res
+	// }
 }
 
 func StartUDPNat(listenPort int, ports []uint16, outFlowMap, inFlowMap *FlowMap, cntId uint16, repl bool) {
-	InitNat(ports)
+	InitNat()
 	defer sc.Close()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{net.IPv4(0, 0, 0, 0), listenPort, ""})
 	if err != nil {
@@ -523,45 +544,8 @@ func StartUDPNat(listenPort int, ports []uint16, outFlowMap, inFlowMap *FlowMap,
 			os.Exit(0)
 		}
 
-		go handlePacket(buff[:size], pktChan, outFlowMap, inFlowMap)
+		//go handlePacket(buff[:size])
 	}
-}
-
-func StartIPInterface(listenPort uint16, outFlowMap, inFlowMap *FlowMap) {
-	conn, err := net.ListenIP("ip4:udp", &net.IPAddr{net.IPv4(0, 0, 0, 0), ""})
-	if err != nil {
-		utils.Log.Printf("Error opening connection on IP interface: %s\n", err)
-		return
-	}
-
-	ip := net.IPv4(192, 168, 1, 102)
-	destIp := ipv4ToInt32(&ip)
-
-	for {
-		buff := make([]byte, 65535)
-		size, err := conn.Read(buff)
-		if err != nil {
-			utils.Log.Printf("Error reading from UDP socket: %s\n", err)
-			continue
-		}
-
-		ip4Pkt := header.IPv4(buff[:size])
-		udpPkt := header.UDP(ip4Pkt.Payload())
-
-		if udpPkt.DestinationPort() == listenPort {
-			utils.Log.Printf("Skipping incoming packet on port %d\n", listenPort)
-			continue
-		}
-
-		srcAddr := ip4Pkt.SourceAddress()
-		res := ipv4ToInt32(addressToIPv4(srcAddr))
-		if res != destIp {
-			continue
-		}
-
-		go handlePacket(buff[:size], pktChan, outFlowMap, inFlowMap)
-	}
-
 }
 
 func addressToIPv4(addr tcpip.Address) *net.IP {
