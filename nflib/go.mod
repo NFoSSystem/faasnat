@@ -1,4 +1,4 @@
-module bitbucket.org/Manaphy91/nflib
+module github.com/NFoSSystem/nflib
 
 go 1.15
 
