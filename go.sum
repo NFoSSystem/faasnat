@@ -1,3 +1,5 @@
+bitbucket.org/Manaphy91/faasnat v0.0.0-20201128204908-3cdfb48c3331 h1:Skh64GQ3dyW94IDfs7PxASrlwK8+yj66+pk5vvV2OAA=
+bitbucket.org/Manaphy91/faasnat v0.0.0-20201128204908-3cdfb48c3331/go.mod h1:vnK7C6EZ0X/1cTipgnjvCE45nR1cNuA0jlMmHI0ydSo=
 dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7gZCb22OMCxBHrMx7a5I7Hp++hsVxbQ4BYO7hU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/bsm/redislock v0.7.0 h1:RL7aZJhCKkuBjQbnSTKCeedTRifBWxd/ffP+GZ599Mo=

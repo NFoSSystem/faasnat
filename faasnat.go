@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"bitbucket.org/Manaphy91/faasnat/handlers"
+	"github.com/NFoSSystem/faasnat/handlers"
 )
 
 func main() {
